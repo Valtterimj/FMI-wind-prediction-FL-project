@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "The project studies wind speed forecasting for maritime use along Finland's southwestern coastline and archipelago. The project uses weather data from 10 FMI stations and implements a feterated learning network to predict wind speed."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fmiopendata>=0.5.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "pandas>=3.0.2",
+    "requests>=2.33.1",
+    "scikit-learn>=1.8.0",
+]
 
 [build-system]
 requires = ["hatchling"]
