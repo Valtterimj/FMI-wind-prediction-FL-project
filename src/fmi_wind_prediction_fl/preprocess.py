@@ -15,21 +15,35 @@ Feature vector  x ∈ R⁵  at hour t:
   Encoding on the unit circle (sin, cos) fixes this discontinuity.
 
 Label  y  at hour t:
-  ws_{t+1}  (next-hour wind speed, kept in original m/s)
+  ws_{t+1}  (next-hour wind speed, standardised — see below)
 
   A row is only kept if the *next* timestamp is exactly 1 hour later.
   Rows that precede a data gap get a nonsense label and are dropped.
 
 Standardisation:
-  X ← (X − μ) / σ   where μ, σ are computed from the training set only.
-  y is NOT standardised (PLANNING.md: "Standardize features").
-  Keeping y in m/s means the MSE loss is directly in m²/s².
+  X ← (X − μ_X) / σ_X   where μ_X, σ_X are computed from the training set only.
+  y ← (y − μ_y) / σ_y   same principle — train-set mean and std of the label.
+
+  Why standardise y even though PLANNING.md says "standardize features"?
+  The model is  ŷ = wᵀx  (no intercept).  If x has zero mean but y has a
+  large non-zero mean (e.g. 7 m/s for exposed stations), the model is forced
+  to use its weights to "explain" the mean rather than the variation, and the
+  minimum achievable MSE is  E[y]² + Var(y)(1−R²)  instead of  Var(y)(1−R²).
+  For an exposed station, E[y]² ≈ 49 m²/s² — larger than any signal the
+  model can explain — so the model would perform worse than a constant
+  predictor.  Standardising y centres it at zero, making the no-intercept
+  model well-posed and the MSE interpretable: it starts at 1.0 and converges
+  toward 1−R² (coefficient of determination).
+
+  Back-transformation for plots and final reporting:
+    ŷ_raw [m/s] = ŷ_std × scaler_y_std  +  scaler_y_mean
 
 Saved per station  →  data/processed/<slug>.npz
-  X_train  (n_train, 5)   y_train  (n_train,)
+  X_train  (n_train, 5)   y_train  (n_train,)   ← y is standardised
   X_val    (n_val,   5)   y_val    (n_val,)
   X_test   (n_test,  5)   y_test   (n_test,)
-  scaler_mean  (5,)        scaler_std  (5,)
+  scaler_mean   (5,)   scaler_std   (5,)         ← for X
+  scaler_y_mean (scalar)  scaler_y_std (scalar)  ← for y (back-transform)
   t_train  (n_train,)      t_val  (n_val,)   t_test  (n_test,)
     ↑ ISO-string timestamps — used by plots.py for the x-axis
 
@@ -164,11 +178,19 @@ def process_station(station: dict) -> dict:
     t_val   = val["time"].astype(str).to_numpy()
     t_test  = test["time"].astype(str).to_numpy()
 
-    # 5. Fit scaler on training features only, then standardise all splits
+    # 5. Fit scalers on training data only, then standardise all splits
+    #    5a. Feature scaler (X)
     scaler_mean, scaler_std = _fit_scaler(X_train)
     X_train = _apply_scaler(X_train, scaler_mean, scaler_std)
     X_val   = _apply_scaler(X_val,   scaler_mean, scaler_std)
     X_test  = _apply_scaler(X_test,  scaler_mean, scaler_std)
+
+    #    5b. Label scaler (y) — fit on y_train only
+    scaler_y_mean = float(y_train.mean())
+    scaler_y_std  = float(y_train.std(ddof=0))
+    y_train = (y_train - scaler_y_mean) / scaler_y_std
+    y_val   = (y_val   - scaler_y_mean) / scaler_y_std
+    y_test  = (y_test  - scaler_y_mean) / scaler_y_std
 
     # 6. Save
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
@@ -180,6 +202,8 @@ def process_station(station: dict) -> dict:
         X_test=X_test,   y_test=y_test,
         scaler_mean=scaler_mean,
         scaler_std=scaler_std,
+        scaler_y_mean=np.float64(scaler_y_mean),
+        scaler_y_std=np.float64(scaler_y_std),
         t_train=t_train, t_val=t_val, t_test=t_test,
     )
 
@@ -258,19 +282,27 @@ def _print_spot_check(summaries: list[dict]) -> None:
     y = npz["y_train"]
     t = npz["t_train"]
 
-    print(f"\n  Spot check — {station['name']} (first 5 training rows, standardised X)")
-    print(f"  {'time':<22}  {'ws':>6} {'sin_wd':>7} {'cos_wd':>7} {'pres':>7} {'temp':>7}  │  {'y (m/s)':>8}")
-    print(f"  {'':<22}  {'(std)':>6} {'(std)':>7} {'(std)':>7} {'(std)':>7} {'(std)':>7}  │  {'raw':>8}")
-    print("  " + "─" * 80)
+    sy_mean = float(npz["scaler_y_mean"])
+    sy_std  = float(npz["scaler_y_std"])
+
+    print(f"\n  Spot check — {station['name']} (first 5 training rows, both X and y standardised)")
+    print(f"  y scaler: mean={sy_mean:.3f} m/s  std={sy_std:.3f} m/s")
+    print(f"  Back-transform: y_raw = y_std × {sy_std:.3f} + {sy_mean:.3f}")
+    print()
+    print(f"  {'time':<22}  {'ws':>6} {'sin_wd':>7} {'cos_wd':>7} {'pres':>7} {'temp':>7}  │  {'y (std)':>8}  {'y (m/s)':>8}")
+    print(f"  {'':<22}  {'(std)':>6} {'(std)':>7} {'(std)':>7} {'(std)':>7} {'(std)':>7}  │  {'':>8}  {'back-tf':>8}")
+    print("  " + "─" * 90)
     for k in range(5):
+        y_raw = y[k] * sy_std + sy_mean
         print(
             f"  {t[k]:<22}  "
             f"{X[k,0]:>6.2f} {X[k,1]:>7.3f} {X[k,2]:>7.3f} {X[k,3]:>7.3f} {X[k,4]:>7.3f}  │  "
-            f"{y[k]:>8.2f}"
+            f"{y[k]:>8.3f}  {y_raw:>8.2f}"
         )
     print(
-        f"\n  Verify: y (m/s) at row k equals ws (raw, m/s) at the NEXT timestamp.\n"
-        f"  The standardised ws at row k and the raw y at row k should be correlated."
+        f"\n  Verify: ws (std) at row k and y (std) at row k should move together"
+        f"\n  (same wind regime — if ws is above average now, next hour tends to be too)."
+        f"\n  The back-transformed y (m/s) should look like plausible wind speeds."
     )
 
 
